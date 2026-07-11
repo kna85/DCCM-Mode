@@ -89,6 +89,19 @@
   .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
   .hidden { display:none; }
   @media (max-width:560px){ .cat-tag{display:none;} td{padding:9px 8px;} }
+  .panes{display:flex;gap:12px;flex-wrap:wrap;}
+  .pane{flex:1 1 220px;display:flex;flex-direction:column;min-width:0;}
+  .pane-h{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-dim);font-weight:700;margin-bottom:6px;}
+  .riskbar{border:1px solid var(--accent);border-radius:var(--radius);background:var(--panel-2);padding:12px 14px;margin-top:18px;}
+  .riskbar-row{display:flex;gap:14px;flex-wrap:wrap;}
+  .riskcell{flex:1 1 160px;display:flex;flex-direction:column;gap:4px;}
+  .rk-label{font-size:11px;color:var(--ink-dim);font-family:var(--mono);}
+  .rk-val{font-size:16px;font-weight:700;font-family:var(--mono);}
+  .rk-val.mort{color:var(--warn);}
+  .soi1,.rom1{color:var(--accent);} .soi2,.rom2{color:var(--code);}
+  .soi3,.rom3{color:var(--warn);} .soi4,.rom4{color:var(--neg);}
+  .rk-note{font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.45;font-family:var(--mono);}
+  @media (max-width:760px){ .panes{flex-direction:column;} }
 </style>
 </head>
 <body>
@@ -106,18 +119,38 @@
 <main>
   <!-- ══════════════ CODER TAB ══════════════ -->
   <section id="tab-coder">
-    <textarea id="input" placeholder="Paste the patient's history & presentation here.  e.g.
-
-68M admitted with septic shock secondary to E. coli UTI. Course complicated by AKI requiring CRRT, hyperkalemia, and acute hypoxic respiratory failure requiring intubation. Background CKD stage 4, type 2 diabetes, atrial fibrillation on apixaban. No evidence of GI bleed."></textarea>
+    <div class="panes">
+      <div class="pane">
+        <label class="pane-h">History</label>
+        <textarea id="inHx" placeholder="Patient history &amp; presentation.  e.g. 68M with septic shock secondary to E. coli UTI; AKI on CRRT; hyperkalemia; acute hypoxic respiratory failure requiring intubation. Background CKD stage 4, T2DM, AF. No GI bleed."></textarea>
+      </div>
+      <div class="pane">
+        <label class="pane-h">Senior input</label>
+        <textarea id="inSenior" placeholder="Senior / consultant review, impression, and plan."></textarea>
+      </div>
+      <div class="pane">
+        <label class="pane-h">Extra information</label>
+        <textarea id="inExtra" placeholder="Investigations, microbiology, imaging, other notes."></textarea>
+      </div>
+    </div>
 
     <div class="toolbar">
       <button class="btn btn-primary" id="genBtn">Generate ICD-10 list</button>
+      <button class="btn" id="summaryBtn">Generate summary</button>
       <button class="btn btn-ghost" id="clearBtn">Clear</button>
       <span class="spacer"></span>
       <span class="hint" id="matchStat"></span>
     </div>
 
     <div id="results"></div>
+    <div id="riskBar" class="riskbar hidden"></div>
+    <div id="summaryBox" class="output-box hidden">
+      <div class="toolbar" style="margin-bottom:8px">
+        <button class="btn btn-primary" id="copySummaryBtn">Copy summary</button>
+        <span class="hint" id="wordCount"></span>
+      </div>
+      <textarea id="summaryText" readonly placeholder="Structured summary appears here."></textarea>
+    </div>
   </section>
 
   <!-- ══════════════ REFERENCE TAB ══════════════ -->
@@ -798,8 +831,94 @@ function match(raw){
 const $=id=>document.getElementById(id);
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
+/* ═══════════════════════════════════════════════════════════════════
+   5b. THREE-PANE INPUT · SOI/ROM ESTIMATE · SUMMARY  (all offline)
+   ═══════════════════════════════════════════════════════════════════ */
+function val(id){ const e=$(id); return e?e.value:""; }
+function combinedText(){ return ["inHx","inSenior","inExtra"].map(val).filter(t=>t.trim()).join(".\n"); }
+
+/* Transparent acuity heuristic — NOT the proprietary 3M APR-DRG grouper.
+   Each code -> {soi,rom} on a 1-4 (Minor/Moderate/Major/Extreme) scale by
+   keyword. Tune the regexes below to adjust weighting. */
+const SUBCLASS=["","Minor","Moderate","Major","Extreme"];
+const ROM_BAND=["","0–2%","2–10%","10–30%","30–70%+"];
+function acuity(code,desc){
+  const d=(desc||"").toLowerCase(); let rom=1,soi=1;
+  if(/cardiac arrest|septic shock|ards|acute respiratory distress|disseminated intravascular|hepatic failure|hepatorenal|intracerebral hemorrhage|subarachnoid hemorrhage|status epilepticus|cardiac tamponade|dissection of thoracic aorta|amniotic fluid embolism|eclampsia|hellp|anaphylactic shock|toxic megacolon|necrotizing fasciitis|ventricular fibrillation|ventricular flutter|meningococc|coma|cerebral edema|tumor lysis|cytokine release|hemophagocytic|myxedema|thyroid storm|adrenal crisis|addisonian|infected necrosis|combined systolic and diastolic/.test(d)){rom=4;soi=4;}
+  else if(/shock|severe sepsis|respiratory failure|acute kidney|acute pancreatitis|myocardial infarction|non-st elevation|st elevation|acute systolic|acute diastolic|acute on chronic|acute combined|pulmonary embolism|cerebral infarction|nontraumatic|encephalopathy|hyperkalemia|acid-base|acidosis|gastrointestinal hemorrhage|esophageal varices|variceal|rhabdomyolysis|dependence on ventilator|status asthmaticus|hyperosmolarity|ketoacidosis|thrombotic thrombocytopenic|thrombotic microangiopathy|agranulocytosis|febrile neutropenia|generalized \(acute\) peritonitis|cholangitis|ischemia of intestine|perforation of intestine|compression|pre-eclampsia|postpartum hemorrhage|sickle cell disease with crisis|acute hepatic|guillain|myasthenia gravis with/.test(d)){rom=3;soi=3;}
+  else if(/sepsis|bacteremia|candidal|failure|infection|pneumonia|hemorrhage|embolism|thrombosis|fibrillation|flutter|tachycardia|bradycardia|hypokalemia|hyponatremia|hypernatremia|hypocalcemia|hypercalcemia|hypomagnesemia|delirium|convulsions|seizure|epilepsy|pancreatitis|cellulitis|pyelonephritis|endocarditis|obstruction|ileus|anemia|coagulation|thrombocytopenia|neutropenia|hypertensive emergency|malnutrition|dehydration|hypovolemia|volume depletion|fluid overload|copd|asthma|effusion|pneumothorax|pulmonary edema|hydronephrosis|cirrhosis|ascites|hepatitis|withdrawal|hypoglycemia|hyperglycemia|myocarditis|pericarditis/.test(d)){rom=2;soi=2;}
+  if(/^Z/.test(code) && !/dependence on ventilator/.test(d)){rom=1;soi=Math.min(soi,2);}
+  if(/chronic kidney disease, stage [123]|paroxysmal atrial|permanent atrial|hypothyroidism, unspecified|long-term|presence of|do not resuscitate|palliative|tracheostomy status|gastrostomy status|transplant status/.test(d)){rom=Math.min(rom,1);soi=Math.min(soi,2);}
+  return {soi,rom};
+}
+function estimateRisk(codes){
+  if(!codes||!codes.length) return null;
+  const items=codes.map(c=>({...c,...acuity(c.code,c.desc)}));
+  let soi=Math.max(...items.map(i=>i.soi)), rom=Math.max(...items.map(i=>i.rom));
+  const majRom=items.filter(i=>i.rom>=3).length, majSoi=items.filter(i=>i.soi>=3).length;
+  if(majRom>=2 && rom<4) rom++;                 // multiple significant comorbidities escalate
+  if(majSoi>=2 && soi<4) soi++;
+  const systems=new Set(items.map(i=>(i.cat||"").split(" · ")[0])).size;
+  if(systems>=3 && majRom>=1 && rom<4) rom++;   // multi-system involvement
+  soi=Math.min(4,soi); rom=Math.min(4,rom);
+  return {soi,rom,systems,n:items.length};
+}
+function updateRisk(){
+  const bar=$("riskBar"); if(!bar) return;
+  const r=estimateRisk(selected());
+  if(!r){ bar.classList.add("hidden"); bar.innerHTML=""; return; }
+  bar.classList.remove("hidden");
+  bar.innerHTML=`
+    <div class="riskbar-row">
+      <div class="riskcell"><span class="rk-label">Severity of Illness (SOI)</span><span class="rk-val soi${r.soi}">${r.soi} · ${SUBCLASS[r.soi]}</span></div>
+      <div class="riskcell"><span class="rk-label">Risk of Mortality (ROM)</span><span class="rk-val rom${r.rom}">${r.rom} · ${SUBCLASS[r.rom]}</span></div>
+      <div class="riskcell"><span class="rk-label">Illustrative predicted in-hospital mortality</span><span class="rk-val mort">${ROM_BAND[r.rom]}</span></div>
+    </div>
+    <div class="rk-note">Educational heuristic from ${r.n} selected code${r.n!==1?"s":""} across ${r.systems} body system${r.systems!==1?"s":""}. NOT the validated 3M APR-DRG SOI/ROM and NOT case-mix adjusted — do not use for clinical decisions, prognostication, benchmarking, or billing.</div>`;
+}
+
+/* Deterministic, offline structured summary (no AI / no network) capped at 500 words */
+function capWords(str,n){ const w=str.trim().split(/\s+/); return w.length<=n?str.trim():w.slice(0,n).join(" ")+"…"; }
+function buildSummary(){
+  const clean=t=>t.replace(/\s+/g," ").trim();
+  const hx=clean(val("inHx")), sr=clean(val("inSenior")), ex=clean(val("inExtra"));
+  let sel=selected();
+  if(!sel.length){ sel=match(combinedText()).hits.map(h=>({code:h.code,desc:h.desc,cat:h.cat})); }
+  const risk=estimateRisk(sel);
+  const tail=[];
+  if(sel.length) tail.push("Active problems (ICD-10): "+sel.map(s=>`${s.desc} (${s.code})`).join("; ")+".");
+  if(risk) tail.push(`Acuity estimate (educational, non-validated): SOI ${risk.soi} (${SUBCLASS[risk.soi]}), ROM ${risk.rom} (${SUBCLASS[risk.rom]}); illustrative predicted in-hospital mortality ${ROM_BAND[risk.rom]}.`);
+  const tailText=tail.join("\n\n");
+  const tailWords=tailText?tailText.split(/\s+/).length:0;
+  let budget=500 - tailWords - 3; if(budget<40) budget=40;
+  const narr=[];
+  if(hx) narr.push("History of presenting illness: "+hx);
+  if(sr) narr.push("Senior review: "+sr);
+  if(ex) narr.push("Additional information: "+ex);
+  let narrText=capWords(narr.join("\n\n"),budget);
+  let text=["CLINICAL SUMMARY",narrText,tailText].filter(Boolean).join("\n\n");
+  text=capWords(text,500);
+  return {text, words:text.trim().split(/\s+/).length};
+}
+function generateSummary(){
+  if(!combinedText().trim()){ toast("Enter some notes first"); return; }
+  const {text,words}=buildSummary();
+  $("summaryBox").classList.remove("hidden");
+  $("summaryText").value=text;
+  $("wordCount").textContent=words+" / 500 words";
+  const ta=$("summaryText"); ta.style.height="auto"; ta.style.height=Math.min(ta.scrollHeight+4,600)+"px";
+}
+function copySummary(){
+  const t=$("summaryText").value; if(!t){ toast("Nothing to copy"); return; }
+  navigator.clipboard.writeText(t).then(()=>toast("Summary copied"))
+    .catch(()=>{$("summaryText").select();document.execCommand("copy");toast("Summary copied");});
+}
+$("summaryBtn").onclick=generateSummary;
+$("copySummaryBtn").onclick=copySummary;
+
 function generate(){
-  const raw=$("input").value;
+  const raw=combinedText();
+  $("riskBar").classList.add("hidden");
   const {hits,negated}=match(raw);
   const box=$("results");
   if(!raw.trim()){ box.innerHTML=`<div class="empty">Paste a clinical summary above, then press <strong>Generate</strong>.</div>`; $("matchStat").textContent=""; return; }
@@ -808,7 +927,7 @@ function generate(){
   const maybe=hits.filter(h=>h.conf<45);
   const rowHtml=(r,checked,cls="")=>`
     <label class="res ${cls}">
-      <input type="checkbox" data-code="${esc(r.code)}" data-desc="${esc(r.desc)}" ${checked?"checked":""}>
+      <input type="checkbox" data-code="${esc(r.code)}" data-desc="${esc(r.desc)}" data-cat="${esc(r.cat)}" ${checked?"checked":""}>
       <div class="res-main">
         <span class="res-code">${esc(r.code)}</span> &nbsp;<span class="res-desc">${esc(r.desc)}</span>
         <div class="res-meta">${esc(r.cat)}</div>
@@ -832,12 +951,14 @@ function generate(){
   $("matchStat").textContent=`${hits.length} match${hits.length!==1?"es":""}${negated.length?` · ${negated.length} negated`:""}`;
   $("copyBtn").onclick=copySelected;
   $("csvBtn").onclick=downloadCSV;
-  $("allBtn").onclick=()=>box.querySelectorAll('input[type=checkbox]').forEach(c=>c.checked=true);
-  $("noneBtn").onclick=()=>box.querySelectorAll('input[type=checkbox]').forEach(c=>c.checked=false);
+  $("allBtn").onclick=()=>{box.querySelectorAll('input[type=checkbox]').forEach(c=>c.checked=true);updateRisk();};
+  $("noneBtn").onclick=()=>{box.querySelectorAll('input[type=checkbox]').forEach(c=>c.checked=false);updateRisk();};
+  box.querySelectorAll('input[type=checkbox]').forEach(c=>c.addEventListener('change',updateRisk));
+  updateRisk();
 }
 function selected(){
   return [...document.querySelectorAll('#results input[type=checkbox]:checked')]
-    .map(c=>({code:c.dataset.code,desc:c.dataset.desc}));
+    .map(c=>({code:c.dataset.code,desc:c.dataset.desc,cat:c.dataset.cat}));
 }
 function copySelected(){
   const sel=selected(); if(!sel.length){ toast("Nothing selected"); return; }
@@ -854,8 +975,8 @@ function downloadCSV(){
   a.download="icd10-problem-list.csv"; a.click(); toast(`Exported ${sel.length} codes`);
 }
 $("genBtn").onclick=generate;
-$("clearBtn").onclick=()=>{$("input").value="";$("results").innerHTML=initEmpty();$("matchStat").textContent="";$("input").focus();};
-$("input").addEventListener("keydown",e=>{ if((e.metaKey||e.ctrlKey)&&e.key==="Enter") generate(); });
+$("clearBtn").onclick=()=>{["inHx","inSenior","inExtra"].forEach(id=>$(id).value="");$("results").innerHTML=initEmpty();$("matchStat").textContent="";$("riskBar").classList.add("hidden");$("summaryBox").classList.add("hidden");$("inHx").focus();};
+["inHx","inSenior","inExtra"].forEach(id=>$(id).addEventListener("keydown",e=>{ if((e.metaKey||e.ctrlKey)&&e.key==="Enter") generate(); }));
 
 /* ═══════════════════════════════════════════════════════════════════
    6. REFERENCE TAB
