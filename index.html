@@ -643,6 +643,11 @@ const GENERIC = new Set(("severe mild moderate crisis malignant congestive rever
   "uninfected complete generalized acquired congenital nonspecific grade following forms "+
   "site extent partial").split(" "));
 
+/* Context words that must NEVER be standalone single-word match keys
+   (e.g. "troponin negative" must not help fire "gram-negative sepsis").
+   Multiword keys like "gram negative" are unaffected. */
+const NOKEY = new Set(["negative","positive"]);
+
 /* ═══════════════════════════════════════════════════════════════════
    3. BUILD SEARCH INDEX  (per code -> weighted keys)
    ═══════════════════════════════════════════════════════════════════ */
@@ -666,7 +671,7 @@ function buildIndex(){
     // single-word diagnosis (e.g. "Hyperkalemia", "Melena") -> strong whole key
     if(toks.length===1) keys.push({t:toks[0],w:3});
     for(let i=0;i<toks.length-1;i++) keys.push({t:toks[i]+" "+toks[i+1],w:2.5});
-    toks.forEach(w=>keys.push({t:w,w:1}));
+    toks.forEach(w=>{ if(!NOKEY.has(w)) keys.push({t:w,w:1}); });
     const m={}; keys.forEach(k=>{ if(!m[k.t]||m[k.t]<k.w) m[k.t]=k.w; });
     const maxScore=Object.values(m).reduce((a,b)=>a+b,0);
     return {code,desc,cat,keys:Object.entries(m).map(([t,w])=>({t,w})),maxScore};
@@ -693,6 +698,63 @@ function segIsNegated(seg,keyAnchor){
 }
 function hasPhrase(hay,phrase){
   return new RegExp("(^|[^a-z0-9])"+esc4re(phrase)+"([^a-z0-9]|$)").test(hay);
+}
+/* Family de-duplication: when a note names a graded/typed diagnosis, collapse the
+   whole ICD family to the single documented variant instead of listing every stage.
+   Only triggers when the family concept is actually named in the text. */
+const FAMILY_REFINE = [
+  { fam:"N18.", phrase:/chronic kidney disease|\bckd\b/, rules:[
+      [/\besrd\b|\beskd\b|end[- ]stage renal/,"N18.6"],
+      [/stage\s*3\s*a\b/,"N18.31"],
+      [/stage\s*3\s*b\b/,"N18.32"],
+      [/stage\s*3\b/,"N18.30"],
+      [/stage\s*2\b/,"N18.2"],
+      [/stage\s*1\b/,"N18.1"],
+      [/stage\s*4\b/,"N18.4"],
+      [/stage\s*5\b/,"N18.5"],
+    ], fallback:"N18.9" },
+  { fam:"I50.", phrase:/heart failure|\bchf\b|\bccf\b|\bhfref\b|\bhfpef\b|\badhf\b/, rules:[
+      [/combined|systolic and diastolic|mixed systolic/,"I50.41"],
+      [/right[ -](?:heart|ventric\w*|sided)\w* fail|\brv failure\b/,"I50.814"],
+      [/(?:acute[ -]on[ -]chronic|acute on chronic|decompensat\w*)[\s\S]*?(?:systolic|hfref|reduced ejection|reduced ef)|(?:systolic|hfref)[\s\S]*?(?:acute[ -]on[ -]chronic|acute on chronic|decompensat\w*)/,"I50.23"],
+      [/(?:acute[ -]on[ -]chronic|acute on chronic|decompensat\w*)[\s\S]*?(?:diastolic|hfpef|preserved ejection|preserved ef)|(?:diastolic|hfpef)[\s\S]*?(?:acute[ -]on[ -]chronic|acute on chronic|decompensat\w*)/,"I50.33"],
+      [/\badhf\b/,"I50.23"],
+      [/systolic|hfref|reduced ejection fraction|reduced ef\b/,"I50.21"],
+      [/diastolic|hfpef|preserved ejection fraction|preserved ef\b/,"I50.31"],
+    ], fallback:"I50.9" },
+  { fam:"I48.", phrase:/atrial fibrillation|\bafib\b|\baf\b|\ba fib\b/, rules:[
+      [/paroxysmal/,"I48.0"],
+      [/permanent|chronic/,"I48.21"],
+    ], fallback:"I48.91" },
+  { fam:"I26.", phrase:/pulmonary embolism|\bpe\b/, rules:[
+      [/septic/,"I26.90"],
+      [/cor pulmonale|acute cor|rv strain|right ventric\w* strain|right heart strain/,"I26.09"],
+    ], fallback:"I26.99" },
+  { fam:"J96.", phrase:/respiratory failure/, rules:[
+      [/acute[ -](?:and|&|on)[ -]chronic|acute on chronic/,"J96.20"],
+      [/\bchronic\b/,"J96.10"],
+      [/hypercap|hypercarb/,"J96.02"],
+      [/hypox/,"J96.01"],
+      [/\bacute\b/,"J96.00"],
+    ], fallback:"J96.90" },
+];
+function refineFamilies(list,textLower){
+  FAMILY_REFINE.forEach(f=>{
+    const fam=list.filter(r=>r.code.startsWith(f.fam));
+    if(fam.length<2) return;                 // one or none: nothing to collapse
+    if(!f.phrase.test(textLower)) return;    // family concept not actually named
+    let target=f.fallback;
+    for(const [re,code] of f.rules){ if(re.test(textLower)){ target=code; break; } }
+    const ref=fam[0];                        // highest-scoring member (list pre-sorted)
+    for(let i=list.length-1;i>=0;i--){
+      if(list[i].code.startsWith(f.fam) && list[i].code!==target) list.splice(i,1);
+    }
+    if(!list.some(r=>r.code===target)){
+      const e=INDEX.find(x=>x.code===target);
+      if(e) list.push({...e,score:ref.score,conf:ref.conf,ev:ref.ev,negated:ref.negated});
+    }
+  });
+  return list;
 }
 function match(raw){
   if(!raw.trim()) return {hits:[],negated:[]};
@@ -723,7 +785,11 @@ function match(raw){
   const byCode={};
   results.forEach(r=>{ if(!byCode[r.code]||byCode[r.code].score<r.score) byCode[r.code]=r; });
   const all=Object.values(byCode).sort((a,b)=>b.score-a.score||a.code.localeCompare(b.code));
-  return { hits:all.filter(r=>!r.negated), negated:all.filter(r=>r.negated) };
+  const textLower=" "+raw.toLowerCase().replace(/\s+/g," ").trim()+" ";
+  let hits=refineFamilies(all.filter(r=>!r.negated),textLower);
+  let negated=refineFamilies(all.filter(r=>r.negated),textLower);
+  hits.sort((a,b)=>b.score-a.score||a.code.localeCompare(b.code));
+  return { hits, negated };
 }
 
 /* ═══════════════════════════════════════════════════════════════════
